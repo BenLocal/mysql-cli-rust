@@ -1,63 +1,66 @@
 /*!
- * 数据库元数据管理
+ * Database metadata management
  *
- * 负责缓存和管理数据库的元数据信息，包括：
- * - 数据库列表
- * - 表名信息
- * - 字段信息
- * - 缓存刷新逻辑
+ * Responsible for caching and managing database metadata information, including:
+ * - Database list
+ * - Table information
+ * - Field information
+ * - Cache refresh logic
  */
 
 use anyhow::Result;
 use mysql::prelude::*;
 use std::collections::HashMap;
 
-/// 数据库元数据缓存
+/// Database metadata cache
 #[derive(Debug)]
 pub struct DatabaseMetadata {
-    /// 数据库列表
+    /// Database list
     pub databases: Vec<String>,
-    /// 表信息：数据库名 -> 表名列表
+    /// Table information: database name -> table name list
     pub tables: HashMap<String, Vec<String>>,
-    /// 字段信息：表名 -> 字段列表
+    /// Field information: table name -> field list
     pub columns: HashMap<String, Vec<String>>,
-    /// 最后更新时间
+    /// Last update time
     last_update: std::time::Instant,
+    /// Whether data has been loaded at least once
+    has_loaded: bool,
 }
 
 impl DatabaseMetadata {
-    /// 创建新的元数据实例
+    /// Create new metadata instance
     pub fn new() -> Self {
         Self {
             databases: Vec::new(),
             tables: HashMap::new(),
             columns: HashMap::new(),
             last_update: std::time::Instant::now(),
+            has_loaded: false,
         }
     }
 
-    /// 检查是否需要刷新缓存（5分钟过期）
+    /// Check if cache needs refresh (5 minute expiry)
     pub fn needs_refresh(&self) -> bool {
-        self.last_update.elapsed().as_secs() > 300
+        !self.has_loaded || self.last_update.elapsed().as_secs() > 300
     }
 
-    /// 从数据库连接更新元数据
+    /// Update metadata from database connection
     pub fn update_from_connection(&mut self, conn: &mut mysql::Conn) -> Result<()> {
         if !self.needs_refresh() {
             return Ok(());
         }
 
-        // 获取数据库列表
+        // Get database list
         let databases: Vec<String> = conn.query("SHOW DATABASES")?;
         self.databases = databases.clone();
 
-        // 清空旧的表和列信息
+        // Clear old table and column information
         self.tables.clear();
         self.columns.clear();
 
-        // 获取每个数据库的表信息
+        // Get table information for each database
         for db in &databases {
-            // 跳过系统数据库的详细表信息获取（避免权限问题）
+            // Skip detailed table information retrieval for system databases (avoid permission issues)
             if self.is_system_database(db) {
                 continue;
             }
@@ -65,7 +68,7 @@ impl DatabaseMetadata {
             if let Ok(tables) = conn.query::<String, _>(format!("SHOW TABLES FROM `{}`", db)) {
                 self.tables.insert(db.clone(), tables.clone());
 
-                // 获取每个表的列信息
+                // Get column information for each table
                 for table in &tables {
                     let query = format!("SHOW COLUMNS FROM `{}`.`{}`", db, table);
                     if let Ok(rows) = conn.query::<mysql::Row, _>(query) {
@@ -83,10 +86,11 @@ impl DatabaseMetadata {
         }
 
         self.last_update = std::time::Instant::now();
+        self.has_loaded = true;
         Ok(())
     }
 
-    /// 检查是否为系统数据库
+    /// Check if it's a system database
     fn is_system_database(&self, db: &str) -> bool {
         matches!(
             db,
@@ -94,12 +98,12 @@ impl DatabaseMetadata {
         )
     }
 
-    /// 获取所有数据库名
+    /// Get all database names
     pub fn get_databases(&self) -> &Vec<String> {
         &self.databases
     }
 
-    /// 获取所有表名（跨数据库）
+    /// Get all table names (across databases)
     pub fn get_all_tables(&self) -> Vec<(&String, &String)> {
         let mut tables = Vec::new();
         for (db, table_list) in &self.tables {
@@ -110,7 +114,7 @@ impl DatabaseMetadata {
         tables
     }
 
-    /// 获取所有列名（跨表）
+    /// Get all column names (across tables)
     pub fn get_all_columns(&self) -> Vec<(&String, &String)> {
         let mut columns = Vec::new();
         for (table, column_list) in &self.columns {

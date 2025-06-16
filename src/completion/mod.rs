@@ -1,11 +1,11 @@
 /*!
- * MySQL CLI Rust - 智能补全模块
+ * MySQL CLI Rust - Smart completion module
  *
- * 提供传统命令行补全体验，支持：
- * - SQL 关键字补全
- * - 数据库名、表名、字段名的自动补全
- * - 上下文感知的智能建议
- * - 内联提示和历史记录
+ * Provides traditional command-line completion experience, supporting:
+ * - SQL keyword completion
+ * - Database name, table name, field name auto-completion
+ * - Context-aware smart suggestions
+ * - Inline hints and history
  */
 
 pub mod engine;
@@ -13,5 +13,5 @@ pub mod helper;
 pub mod metadata;
 pub mod suggestion;
 
-// 重新导出主要接口
+// Re-export main interfaces
 pub use helper::MySQLHelper;

@@ -55,6 +55,11 @@ impl Cli {
 
         editor.set_helper(Some(helper));
 
+        // Set initial current database in completion engine if available
+        if let Some(helper) = editor.helper() {
+            helper.set_current_database(current_database.clone());
+        }
+
         Ok(Self {
             connection,
             query_executor,
@@ -184,6 +189,12 @@ impl Cli {
     fn use_database(&mut self, db_name: &str) -> Result<()> {
         self.execute_query(&format!("USE {}", db_name))?;
         self.current_database = Some(db_name.to_string());
+        
+        // Update completion engine with current database
+        if let Some(helper) = self.editor.helper() {
+            helper.set_current_database(self.current_database.clone());
+        }
+        
         println!("Database changed");
         Ok(())
     }
@@ -210,10 +221,24 @@ impl Cli {
             if trimmed_query.starts_with("USE") {
                 if let Some(db_name) = query.split_whitespace().nth(1) {
                     self.current_database = Some(db_name.trim_matches('`').to_string());
+                    
+                    // Update completion engine with current database
+                    if let Some(helper) = self.editor.helper() {
+                        helper.set_current_database(self.current_database.clone());
+                    }
+                    
+                    // update db matadata
+                    self.update_metadata();
                 }
             }
         }
 
         result
+    }
+
+    fn update_metadata(&mut self) {
+        if let Ok(mut meta) = self.metadata.lock() {
+            let _ = meta.update_from_connection(self.connection.get_conn_mut());
+        }
     }
 }

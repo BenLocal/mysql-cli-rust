@@ -1,13 +1,12 @@
 /*!
- * MySQL 补全助手
+ * MySQL completion helper
  *
- * 整合了所有补全功能的主要接口，实现 rustyline 的各种 trait
+ * Main interface integrating all completion functionality, implementing various rustyline traits
  */
 
 use super::engine::SmartSuggestionEngine;
 use super::metadata::DatabaseMetadata;
 use anyhow::Result;
-use mysql;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::{Highlighter, MatchingBracketHighlighter};
@@ -16,43 +15,28 @@ use rustyline::validate::{self, MatchingBracketValidator, Validator};
 use rustyline::Context;
 use std::sync::{Arc, Mutex};
 
-/// MySQL 补全器
+/// MySQL Completer
 pub struct MySQLCompleter {
     sql_keywords: Vec<String>,
-    metadata: Arc<Mutex<DatabaseMetadata>>,
     suggestion_engine: SmartSuggestionEngine,
 }
 
 impl MySQLCompleter {
-    /// 创建新的补全器
-    pub fn new() -> Self {
-        let sql_keywords = Self::init_sql_keywords();
-        let metadata = Arc::new(Mutex::new(DatabaseMetadata::new()));
-        let suggestion_engine = SmartSuggestionEngine::new(metadata.clone(), sql_keywords.clone());
-
-        Self {
-            sql_keywords,
-            metadata,
-            suggestion_engine,
-        }
-    }
-
-    /// 使用共享元数据创建补全器
+    /// Create completer with shared metadata
     pub fn with_metadata(metadata: Arc<Mutex<DatabaseMetadata>>) -> Self {
         let sql_keywords = Self::init_sql_keywords();
         let suggestion_engine = SmartSuggestionEngine::new(metadata.clone(), sql_keywords.clone());
 
         Self {
             sql_keywords,
-            metadata,
             suggestion_engine,
         }
     }
 
-    /// 初始化SQL关键字列表
+    /// Initialize SQL keywords list
     fn init_sql_keywords() -> Vec<String> {
         let keywords = [
-            // 基本SQL关键字
+            // Basic SQL keywords
             "SELECT",
             "FROM",
             "WHERE",
@@ -135,7 +119,7 @@ impl MySQLCompleter {
             "INTO",
             "VALUES",
             "SET",
-            // 条件和操作符
+            // Conditions and operators
             "AND",
             "OR",
             "NOT",
@@ -152,14 +136,14 @@ impl MySQLCompleter {
             "THEN",
             "ELSE",
             "END",
-            // 聚合函数
+            // Aggregate functions
             "COUNT",
             "SUM",
             "AVG",
             "MIN",
             "MAX",
             "GROUP_CONCAT",
-            // 字符串函数
+            // String functions
             "CONCAT",
             "SUBSTRING",
             "LENGTH",
@@ -225,7 +209,7 @@ impl MySQLCompleter {
             "START",
             "STOP",
             "RESTART",
-            // 事务控制
+            // Transaction control
             "BEGIN",
             "COMMIT",
             "ROLLBACK",
@@ -235,7 +219,7 @@ impl MySQLCompleter {
             "READ",
             "WRITE",
             "ONLY",
-            // 其他
+            // Others
             "LOCK",
             "UNLOCK",
             "TABLES",
@@ -250,18 +234,17 @@ impl MySQLCompleter {
         keywords.iter().map(|s| s.to_string()).collect()
     }
 
-    /// 更新数据库元数据
-    pub fn update_metadata(&self, conn: &mut mysql::Conn) -> Result<()> {
-        let mut metadata = self.metadata.lock().unwrap();
-        metadata.update_from_connection(conn)
-    }
-
-    /// 获取当前单词的起始位置
+    /// Get current word start position
     fn get_word_start(&self, line: &str, pos: usize) -> usize {
         line[..pos]
             .rfind(|c: char| c.is_whitespace() || c == '(' || c == ',' || c == '.' || c == ';')
             .map(|i| i + 1)
             .unwrap_or(0)
+    }
+
+    /// Update current database for better context-aware suggestions
+    pub fn set_current_database(&self, database: Option<String>) {
+        self.suggestion_engine.set_current_database(database);
     }
 }
 
@@ -277,40 +260,64 @@ impl Completer for MySQLCompleter {
         let start = self.get_word_start(line, pos);
         let word = &line[start..pos];
 
-        // 使用智能提示引擎获取建议
+        // Use smart suggestion engine to get suggestions
         let suggestions = self.suggestion_engine.get_suggestions(line, word);
 
         let mut completions = Vec::new();
 
-        // 将智能建议转换为 rustyline 的 Pair 格式
+        // Convert smart suggestions to rustyline Pair format
         for suggestion in suggestions {
+            // Extract clean text for replacement (remove backticks)
+            let clean_text = suggestion.text.trim_matches('`').to_string();
+
             completions.push(Pair {
-                display: suggestion.format_display(),
-                replacement: suggestion.text,
+                display: format!(
+                    "{} {} - {}",
+                    suggestion.category.icon(),
+                    clean_text,
+                    suggestion.description
+                ),
+                replacement: clean_text,
             });
         }
 
-        // 如果没有智能建议，回退到传统的关键字补全
+        // If no smart suggestions, check if we're in a specific context where we shouldn't show SQL keywords
         if completions.is_empty() {
-            let word_lower = word.to_lowercase();
-            for keyword in &self.sql_keywords {
-                if keyword.to_lowercase().starts_with(&word_lower) {
-                    completions.push(Pair {
-                        display: format!("🔵 {} - SQL关键字", keyword),
-                        replacement: keyword.clone(),
-                    });
+            let line_upper = line.to_uppercase();
+            let should_show_keywords = !line_upper.ends_with("FROM ")
+                && !line_upper.ends_with("JOIN ")
+                && !line_upper.ends_with("USE ");
+
+            if should_show_keywords {
+                let word_lower = word.to_lowercase();
+                for keyword in &self.sql_keywords {
+                    if keyword.to_lowercase().starts_with(&word_lower) {
+                        completions.push(Pair {
+                            display: format!("🔵 {} - SQL keyword", keyword),
+                            replacement: keyword.clone(),
+                        });
+                    }
                 }
             }
         }
 
-        // 限制结果数量
-        completions.truncate(10);
+        // Limit result count based on context
+        let line_upper = line.to_uppercase();
+        let limit = if line_upper.contains("USE ") {
+            20 // Show more databases for USE command
+        } else if line_upper.ends_with("FROM ") || line_upper.ends_with("JOIN ") {
+            15 // Show more tables for FROM/JOIN
+        } else {
+            10 // Default limit
+        };
+
+        completions.truncate(limit);
 
         Ok((start, completions))
     }
 }
 
-/// MySQL 助手（整合所有功能）
+/// MySQL Helper (integrating all functionality)
 pub struct MySQLHelper {
     completer: MySQLCompleter,
     highlighter: MatchingBracketHighlighter,
@@ -319,17 +326,7 @@ pub struct MySQLHelper {
 }
 
 impl MySQLHelper {
-    /// 创建新的MySQL助手
-    pub fn new() -> Self {
-        Self {
-            completer: MySQLCompleter::new(),
-            highlighter: MatchingBracketHighlighter::new(),
-            validator: MatchingBracketValidator::new(),
-            hinter: HistoryHinter::new(),
-        }
-    }
-
-    /// 使用共享元数据创建MySQL助手
+    /// Create MySQL helper with shared metadata
     pub fn with_metadata(metadata: Arc<Mutex<DatabaseMetadata>>) -> Self {
         Self {
             completer: MySQLCompleter::with_metadata(metadata),
@@ -339,9 +336,9 @@ impl MySQLHelper {
         }
     }
 
-    /// 更新数据库元数据
-    pub fn update_metadata(&self, conn: &mut mysql::Conn) -> Result<()> {
-        self.completer.update_metadata(conn)
+    /// Update current database for better context-aware suggestions
+    pub fn set_current_database(&self, database: Option<String>) {
+        self.completer.set_current_database(database);
     }
 }
 
@@ -362,48 +359,57 @@ impl Hinter for MySQLHelper {
     type Hint = String;
 
     fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
-        // 首先尝试历史提示
+        // First try history hints
         if let Some(history_hint) = self.hinter.hint(line, pos, ctx) {
             return Some(history_hint);
         }
 
-        // 获取当前正在输入的单词
+        // Get current word being typed
         let start = self.completer.get_word_start(line, pos);
         let word = &line[start..pos];
 
-        // 使用智能提示引擎获取建议
+        // Use smart suggestion engine to get suggestions
         let suggestions = self.completer.suggestion_engine.get_suggestions(line, word);
 
         if !suggestions.is_empty() {
-            // 显示最相关的建议作为内联提示
+            // Show most relevant suggestion as inline hint
             let top_suggestion = &suggestions[0];
 
-            // 如果当前单词不为空，且建议以当前单词开头，显示补全部分
+            // If current word is not empty and suggestion starts with current word, show only completion part
             if !word.is_empty()
                 && top_suggestion
                     .text
                     .to_lowercase()
                     .starts_with(&word.to_lowercase())
             {
-                let completion = &top_suggestion.text[word.len()..];
-                return Some(format!("{} - {}", completion, top_suggestion.description));
+                // Extract the actual completion text (remove backticks if present)
+                let clean_text = top_suggestion.text.trim_matches('`');
+                if clean_text.to_lowercase().starts_with(&word.to_lowercase()) {
+                    let completion = &clean_text[word.len()..];
+                    // Only show the completion part, not the description
+                    if !completion.is_empty() {
+                        return Some(completion.to_string());
+                    }
+                }
             }
 
-            // 否则显示完整的建议
-            return Some(format!("💡 {}", top_suggestion.format_display()));
+            return None;
         }
 
-        // 回退到基本的上下文提示
+        // Fallback to basic context hints
         let line_upper = line.to_uppercase();
 
         if line_upper == "USE" || line_upper.ends_with("USE ") {
-            Some("💡 输入数据库名称 (按 Tab 查看所有选项)".to_string())
+            Some("💡 Enter database name (press Tab to see all options)".to_string())
         } else if line_upper.ends_with("FROM ") || line_upper.ends_with("JOIN ") {
-            Some("💡 输入表名 (按 Tab 查看所有选项)".to_string())
+            Some("💡 Enter table name (press Tab to see all options)".to_string())
         } else if line_upper == "SELECT" {
-            Some("💡 输入列名或 * (按 Tab 查看建议)".to_string())
+            Some("💡 Enter column name or * (press Tab for suggestions)".to_string())
         } else if line.trim().is_empty() {
-            Some("💡 输入 SQL 命令 (如: SELECT, USE, SHOW) 或按 Tab 查看选项".to_string())
+            Some(
+                "💡 Enter SQL command (e.g: SELECT, USE, SHOW) or press Tab for options"
+                    .to_string(),
+            )
         } else {
             None
         }
@@ -412,10 +418,10 @@ impl Hinter for MySQLHelper {
 
 impl Highlighter for MySQLHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
-        // 简单的语法高亮：高亮SQL关键字
+        // Simple syntax highlighting: highlight SQL keywords
         let mut highlighted = line.to_string();
 
-        // 为SQL关键字添加颜色（在终端中显示为粗体）
+        // Add color to SQL keywords (displayed as bold in terminal)
         for keyword in &self.completer.sql_keywords {
             if keyword.chars().all(|c| c.is_uppercase()) {
                 let pattern = format!(r"\b{}\b", regex::escape(keyword));

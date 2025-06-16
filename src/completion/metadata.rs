@@ -66,7 +66,8 @@ impl DatabaseMetadata {
             }
 
             if let Ok(tables) = conn.query::<String, _>(format!("SHOW TABLES FROM `{}`", db)) {
-                self.tables.insert(db.clone(), tables.clone());
+                self.tables
+                    .insert(db.clone().to_lowercase(), tables.clone());
 
                 // Get column information for each table
                 for table in &tables {
@@ -79,7 +80,7 @@ impl DatabaseMetadata {
                             }
                         }
                         let table_key = format!("{}.{}", db, table);
-                        self.columns.insert(table_key, columns);
+                        self.columns.insert(table_key.to_lowercase(), columns);
                     }
                 }
             }

@@ -9,6 +9,9 @@
 
 use super::metadata::DatabaseMetadata;
 use super::suggestion::Suggestion;
+use sqlparser::ast::{Query, SetExpr, Statement};
+use sqlparser::dialect::MySqlDialect;
+use sqlparser::parser::Parser;
 use std::sync::{Arc, Mutex};
 
 /// Input context analysis result
@@ -16,12 +19,24 @@ use std::sync::{Arc, Mutex};
 pub enum InputContext {
     /// USE command
     UseCommand,
-    /// FROM clause
+    /// FROM clause (table names expected)
     FromClause,
-    /// SELECT clause
+    /// SELECT clause (column names, functions expected)
     SelectClause,
-    /// WHERE clause
+    /// WHERE clause (column names, operators, values expected)
     WhereClause,
+    /// INSERT INTO clause (table name expected)
+    InsertIntoClause,
+    /// UPDATE clause (table name expected)
+    UpdateClause,
+    /// ORDER BY clause (column names expected)
+    OrderByClause,
+    /// GROUP BY clause (column names expected)
+    GroupByClause,
+    /// HAVING clause (column names, functions expected)
+    HavingClause,
+    /// JOIN ON clause (column names for join conditions)
+    JoinOnClause,
     /// General case
     General,
 }
@@ -123,9 +138,15 @@ impl SmartSuggestionEngine {
                     suggestions.extend(self.get_function_suggestions(&word_lower));
                 }
             }
-            InputContext::WhereClause => {
+            InputContext::WhereClause | InputContext::HavingClause | InputContext::JoinOnClause => {
                 suggestions.extend(self.get_column_suggestions_for_query(&line_upper, &word_lower));
                 suggestions.extend(self.get_condition_suggestions(&word_lower));
+            }
+            InputContext::OrderByClause | InputContext::GroupByClause => {
+                suggestions.extend(self.get_column_suggestions_for_query(&line_upper, &word_lower));
+            }
+            InputContext::InsertIntoClause | InputContext::UpdateClause => {
+                suggestions.extend(self.get_table_suggestions(&word_lower));
             }
             InputContext::General => {
                 suggestions.extend(self.get_sql_keyword_suggestions(&word_lower));
@@ -140,10 +161,17 @@ impl SmartSuggestionEngine {
 
         // Use different limits based on context
         let limit = match context {
-            InputContext::UseCommand => 20,   // Show more databases
-            InputContext::FromClause => 15,   // Show more tables
+            InputContext::UseCommand => 20, // Show more databases
+            InputContext::FromClause
+            | InputContext::InsertIntoClause
+            | InputContext::UpdateClause => 15, // Show more tables
             InputContext::SelectClause => 12, // Show more columns/functions
-            _ => 10,                          // Default limit for other contexts
+            InputContext::WhereClause
+            | InputContext::HavingClause
+            | InputContext::JoinOnClause
+            | InputContext::OrderByClause
+            | InputContext::GroupByClause => 15, // Show more columns for filtering/sorting
+            InputContext::General => 10,    // Default limit for other contexts
         };
 
         suggestions.truncate(limit);
@@ -151,33 +179,196 @@ impl SmartSuggestionEngine {
         suggestions
     }
 
-    /// Analyze input context
+    /// Analyze input context using SQL parser for better accuracy
     fn analyze_context(&self, line: &str) -> InputContext {
-        let words: Vec<&str> = line.split_whitespace().map(|s| s.trim()).collect();
-        if words.is_empty() {
-            return InputContext::General; // No input, general context
+        let line_trimmed = line.trim();
+
+        // Handle empty input
+        if line_trimmed.is_empty() {
+            return InputContext::General;
         }
 
-        // USE command detection (more comprehensive)
-        if words[0] == "USE" {
+        // Quick check for specific commands first
+        let words: Vec<&str> = line_trimmed.split_whitespace().collect();
+        if let Some(first_word) = words.first() {
+            match first_word.to_uppercase().as_str() {
+                "USE" => return InputContext::UseCommand,
+                _ => {}
+            }
+        }
+
+        // Try to parse the SQL to determine context more accurately
+        if let Ok(context) = self.analyze_sql_context(line_trimmed) {
+            return context;
+        }
+
+        // Fallback to simple text-based analysis for incomplete queries
+        self.analyze_context_fallback(line_trimmed)
+    }
+
+    /// Analyze SQL context using sqlparser
+    fn analyze_sql_context(&self, sql: &str) -> Result<InputContext, Box<dyn std::error::Error>> {
+        let dialect = MySqlDialect {};
+
+        // Try to parse as a complete statement first
+        match Parser::parse_sql(&dialect, sql) {
+            Ok(statements) => {
+                if let Some(stmt) = statements.first() {
+                    return Ok(self.determine_context_from_statement(stmt));
+                }
+            }
+            Err(_) => {
+                // If complete parsing fails, try to analyze incomplete queries
+                return self.analyze_incomplete_sql(sql);
+            }
+        }
+
+        Err("Could not determine context".into())
+    }
+
+    /// Determine context from a parsed SQL statement
+    fn determine_context_from_statement(&self, stmt: &Statement) -> InputContext {
+        match stmt {
+            Statement::Query(query) => self.analyze_query_context(query),
+            Statement::Insert { .. } => InputContext::InsertIntoClause,
+            Statement::Update { .. } => InputContext::UpdateClause,
+            Statement::Use { .. } => InputContext::UseCommand,
+            _ => InputContext::General,
+        }
+    }
+
+    /// Analyze query context (SELECT, FROM, WHERE, etc.)
+    fn analyze_query_context(&self, query: &Query) -> InputContext {
+        if let SetExpr::Select(select) = &*query.body {
+            // Check for different clauses in the SELECT statement
+            if !select.from.is_empty() {
+                if select.selection.is_some() {
+                    InputContext::WhereClause
+                } else {
+                    InputContext::FromClause
+                }
+            } else {
+                InputContext::SelectClause
+            }
+        } else {
+            InputContext::General
+        }
+    }
+
+    /// Analyze incomplete SQL that couldn't be fully parsed
+    fn analyze_incomplete_sql(
+        &self,
+        sql: &str,
+    ) -> Result<InputContext, Box<dyn std::error::Error>> {
+        let sql_upper = sql.to_uppercase();
+
+        // Look for keyword patterns to determine context
+        if sql_upper.ends_with("WHERE") {
+            return Ok(InputContext::WhereClause);
+        }
+
+        if sql_upper.ends_with("FROM") {
+            return Ok(InputContext::FromClause);
+        }
+
+        if sql_upper.ends_with("JOIN") {
+            return Ok(InputContext::FromClause);
+        }
+
+        if sql_upper.ends_with("ON") {
+            return Ok(InputContext::JoinOnClause);
+        }
+
+        if sql_upper.ends_with("ORDER BY") {
+            return Ok(InputContext::OrderByClause);
+        }
+
+        if sql_upper.ends_with("GROUP BY") {
+            return Ok(InputContext::GroupByClause);
+        }
+
+        if sql_upper.ends_with("HAVING") {
+            return Ok(InputContext::HavingClause);
+        }
+
+        if sql_upper.contains("WHERE ") {
+            return Ok(InputContext::WhereClause);
+        }
+
+        if sql_upper.contains("FROM ") {
+            return Ok(InputContext::FromClause);
+        }
+
+        if sql_upper.contains("JOIN ") {
+            return Ok(InputContext::FromClause);
+        }
+
+        if sql_upper.contains(" ON ") {
+            return Ok(InputContext::JoinOnClause);
+        }
+
+        if sql_upper.contains("ORDER BY ") {
+            return Ok(InputContext::OrderByClause);
+        }
+
+        if sql_upper.contains("GROUP BY ") {
+            return Ok(InputContext::GroupByClause);
+        }
+
+        if sql_upper.contains("HAVING ") {
+            return Ok(InputContext::HavingClause);
+        }
+
+        if sql_upper.starts_with("SELECT") {
+            return Ok(InputContext::SelectClause);
+        }
+
+        if sql_upper.starts_with("INSERT INTO") {
+            return Ok(InputContext::InsertIntoClause);
+        }
+
+        if sql_upper.starts_with("UPDATE") {
+            return Ok(InputContext::UpdateClause);
+        }
+
+        Err("Could not determine incomplete SQL context".into())
+    }
+
+    /// Fallback context analysis when SQL parsing fails
+    fn analyze_context_fallback(&self, line: &str) -> InputContext {
+        let words: Vec<&str> = line.split_whitespace().map(|s| s.trim()).collect();
+        if words.is_empty() {
+            return InputContext::General;
+        }
+
+        // USE command detection
+        if words[0].to_uppercase() == "USE" {
             return InputContext::UseCommand;
         }
 
+        // Look for keywords in any position
         for &word in &words {
-            if word == "WHERE" {
-                return InputContext::WhereClause;
-            }
-
-            if word == "FROM" || word == "JOIN" {
-                return InputContext::FromClause;
+            match word.to_uppercase().as_str() {
+                "WHERE" => return InputContext::WhereClause,
+                "FROM" | "JOIN" => return InputContext::FromClause,
+                "ORDER" if words.len() > 1 && words[1].to_uppercase() == "BY" => {
+                    return InputContext::OrderByClause;
+                }
+                "GROUP" if words.len() > 1 && words[1].to_uppercase() == "BY" => {
+                    return InputContext::GroupByClause;
+                }
+                "HAVING" => return InputContext::HavingClause,
+                _ => {}
             }
         }
 
-        if words[0] == "SELECT" {
-            return InputContext::SelectClause;
+        // Check first word for statement type
+        match words[0].to_uppercase().as_str() {
+            "SELECT" => InputContext::SelectClause,
+            "INSERT" => InputContext::InsertIntoClause,
+            "UPDATE" => InputContext::UpdateClause,
+            _ => InputContext::General,
         }
-
-        InputContext::General
     }
 
     /// Calculate matching relevance
@@ -288,30 +479,6 @@ impl SmartSuggestionEngine {
         suggestions
     }
 
-    /// Get column suggestions
-    #[allow(dead_code)]
-    fn get_column_suggestions(&self, word: &str) -> Vec<Suggestion> {
-        let metadata = self.metadata.lock().unwrap();
-        let mut suggestions = Vec::new();
-        let mut count = 0;
-        const MAX_COLUMNS: usize = 50; // Limit to prevent hanging
-
-        for (table, column) in metadata.get_all_columns() {
-            if count >= MAX_COLUMNS {
-                break;
-            }
-
-            let relevance = self.calculate_relevance(column, word, 80);
-            // Show all columns when word is empty, or when relevance is high enough
-            if word.is_empty() || relevance > 50 {
-                suggestions.push(Suggestion::column(column.clone(), table, relevance));
-                count += 1;
-            }
-        }
-
-        suggestions
-    }
-
     /// Get column suggestions for a specific query context
     fn get_column_suggestions_for_query(&self, query: &str, word: &str) -> Vec<Suggestion> {
         // Try to lock metadata with timeout to avoid hanging
@@ -339,7 +506,7 @@ impl SmartSuggestionEngine {
         for table_name in &table_names {
             // First try with current database
             if let Some(current_db_name) = current_db.as_ref() {
-                let full_table_key = format!("{}.{}", current_db_name, table_name);
+                let full_table_key = format!("{}.{}", current_db_name, table_name).to_lowercase();
                 if let Some(columns) = metadata.columns.get(&full_table_key) {
                     for column in columns {
                         if word.is_empty()
@@ -349,30 +516,6 @@ impl SmartSuggestionEngine {
                             suggestions.push(Suggestion::column(
                                 column.clone(),
                                 &full_table_key,
-                                relevance,
-                            ));
-                        }
-                    }
-                }
-            }
-
-            // Also try all other databases
-            for (table_key, columns) in &metadata.columns {
-                if table_key.ends_with(&format!(".{}", table_name)) {
-                    for column in columns {
-                        if word.is_empty()
-                            || column.to_lowercase().starts_with(&word.to_lowercase())
-                        {
-                            let relevance = if current_db.as_ref()
-                                == Some(&table_key.split('.').next().unwrap().to_string())
-                            {
-                                self.calculate_relevance(column, word, 90)
-                            } else {
-                                self.calculate_relevance(column, word, 75)
-                            };
-                            suggestions.push(Suggestion::column(
-                                column.clone(),
-                                table_key,
                                 relevance,
                             ));
                         }
@@ -391,7 +534,8 @@ impl SmartSuggestionEngine {
 
         // Look for FROM and JOIN clauses
         for i in 0..words.len() {
-            if words[i] == "FROM" || words[i] == "JOIN" {
+            let word_upper = words[i].to_uppercase();
+            if word_upper == "FROM" || word_upper == "JOIN" {
                 // The next word should be a table name
                 if i + 1 < words.len() {
                     let table_name = words[i + 1]
@@ -563,3 +707,7 @@ impl SmartSuggestionEngine {
         suggestions
     }
 }
+
+#[cfg(test)]
+#[path = "./engine_tests.rs"]
+mod engine_tests;

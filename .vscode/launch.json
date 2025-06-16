@@ -1,0 +1,49 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "attach",
+      "name": "Attach",
+      "program": "${workspaceFolder}/target/debug/mysql-cli-rust"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug executable 'mysql-cli-rust'",
+      "cargo": {
+        "args": ["build", "--bin=mysql-cli-rust", "--package=mysql-cli-rust"],
+        "filter": {
+          "name": "mysql-cli-rust",
+          "kind": "bin"
+        }
+      },
+      "args": ["-u", "root"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "stopOnEntry": false
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in executable 'mysql-cli-rust'",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--bin=mysql-cli-rust",
+          "--package=mysql-cli-rust"
+        ],
+        "filter": {
+          "name": "mysql-cli-rust",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

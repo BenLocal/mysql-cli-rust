@@ -153,38 +153,28 @@ impl SmartSuggestionEngine {
 
     /// Analyze input context
     fn analyze_context(&self, line: &str) -> InputContext {
-        let words: Vec<&str> = line.split_whitespace().collect();
-        let line_trimmed = line.trim();
+        let words: Vec<&str> = line.split_whitespace().map(|s| s.trim()).collect();
+        if words.is_empty() {
+            return InputContext::General; // No input, general context
+        }
 
         // USE command detection (more comprehensive)
-        if !words.is_empty() && words[0] == "USE" {
-            return InputContext::UseCommand;
-        }
-        // Also check for "USE " pattern at the end
-        if line_trimmed.ends_with("USE") || line_trimmed.ends_with("USE ") || line.contains("USE ")
-        {
+        if words[0] == "USE" {
             return InputContext::UseCommand;
         }
 
-        // FROM/JOIN clause detection (more precise detection)
-        if line_trimmed.ends_with("FROM")
-            || line_trimmed.ends_with("FROM ")
-            || line_trimmed.ends_with("JOIN")
-            || line_trimmed.ends_with("JOIN ")
-            || line.contains(" FROM ")
-            || line.contains(" JOIN ")
-        {
-            return InputContext::FromClause;
+        for &word in &words {
+            if word == "WHERE" {
+                return InputContext::WhereClause;
+            }
+
+            if word == "FROM" || word == "JOIN" {
+                return InputContext::FromClause;
+            }
         }
 
-        // SELECT clause detection (without FROM)
-        if line.contains("SELECT") && !line.contains("FROM") {
+        if words[0] == "SELECT" {
             return InputContext::SelectClause;
-        }
-
-        // WHERE/HAVING clause detection
-        if line.contains("WHERE ") || line.contains("HAVING ") {
-            return InputContext::WhereClause;
         }
 
         InputContext::General
